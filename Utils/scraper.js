@@ -24,9 +24,215 @@ async function fetchPage(url) {
   }
 }
 
+/**
+ * JavaScript unpacker for packed/obfuscated code
+ * Handles p,a,c,k,e,d format commonly used by video players
+ */
+function unpackJs(packedCode) {
+  try {
+    // Find packed code pattern
+    const packedMatch = packedCode.match(/eval\(function\(p,a,c,k,e,d\).*?\}\((.*?)\)\)/s);
+    if (!packedMatch) return null;
+
+    // Extract parameters
+    const params = packedMatch[1].split(',');
+    if (params.length < 6) return null;
+
+    // Parse the packed data
+    const payload = params[0].replace(/^['"]|['"]$/g, '');
+    const radix = parseInt(params[1]);
+    const count = parseInt(params[2]);
+    const symtab = params[3].replace(/^['"]|['"]$/g, '').split('|');
+    
+    // Unpack function
+    const unpack = (p, a, c, k) => {
+      while (c--) {
+        if (k[c]) {
+          const regex = new RegExp('\\b' + c.toString(a) + '\\b', 'g');
+          p = p.replace(regex, k[c]);
+        }
+      }
+      return p;
+    };
+
+    return unpack(payload, radix, count, symtab);
+  } catch (error) {
+    console.error('Error unpacking JS:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Extract video URL from Filemoon player
+ * Filemoon uses packed JavaScript that contains the m3u8 playlist URL
+ * 
+ * @param {string} playerUrl - Filemoon player URL
+ * @returns {Promise<{url: string, quality: string}|null>}
+ */
+async function extractFilemoonVideo(playerUrl) {
+  try {
+    console.log(`Extracting video from Filemoon: ${playerUrl}`);
+    
+    // Fetch the player page
+    const response = await axiosInstance.get(playerUrl, {
+      headers: {
+        'Referer': config.BASE_URL,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+      }
+    });
+    
+    const html = response.data;
+    const $ = cheerio.load(html);
+    
+    // Method 1: Look for iframe redirect (Filemoon often uses nested iframes)
+    const iframe = $('iframe').attr('src');
+    if (iframe && iframe.includes('filemoon')) {
+      const iframeSrc = iframe.startsWith('http') ? iframe : (iframe.startsWith('//') ? `https:${iframe}` : `https://filemoon.sx${iframe}`);
+      console.log(`Found nested Filemoon iframe: ${iframeSrc}`);
+      
+      // Fetch the nested iframe
+      const iframeResponse = await axiosInstance.get(iframeSrc, {
+        headers: {
+          'Referer': playerUrl,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      });
+      
+      return await extractFromFilemoonPage(iframeResponse.data, iframeSrc);
+    }
+    
+    // Method 2: Extract directly from current page
+    return await extractFromFilemoonPage(html, playerUrl);
+    
+  } catch (error) {
+    console.error('Error extracting Filemoon video:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Extract video URL from Filemoon page HTML
+ * @param {string} html - Page HTML content
+ * @param {string} referer - Referer URL
+ * @returns {Promise<{url: string, quality: string}|null>}
+ */
+async function extractFromFilemoonPage(html, referer) {
+  try {
+    // Method 1: Find and unpack JavaScript
+    const scriptMatches = html.match(/<script[^>]*>(.*?)<\/script>/gs);
+    
+    if (scriptMatches) {
+      for (const scriptTag of scriptMatches) {
+        const scriptContent = scriptTag.replace(/<script[^>]*>|<\/script>/g, '');
+        
+        // Look for packed JavaScript (eval(function(p,a,c,k,e,d)))
+        if (scriptContent.includes('eval(function(p,a,c,k,e,d)')) {
+          console.log('Found packed JavaScript, unpacking...');
+          const unpacked = unpackJs(scriptContent);
+          
+          if (unpacked) {
+            // Look for m3u8 URL in unpacked code
+            const m3u8Match = unpacked.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+            if (m3u8Match) {
+              console.log(`Found m3u8 URL: ${m3u8Match[1]}`);
+              return {
+                url: m3u8Match[1],
+                quality: 'Auto'
+              };
+            }
+            
+            // Look for file property
+            const fileMatch = unpacked.match(/file:"([^"]+)"/);
+            if (fileMatch) {
+              console.log(`Found file URL: ${fileMatch[1]}`);
+              return {
+                url: fileMatch[1],
+                quality: 'Auto'
+              };
+            }
+          }
+        }
+        
+        // Method 2: Look for direct m3u8 URLs in non-packed scripts
+        const m3u8Match = scriptContent.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+        if (m3u8Match) {
+          console.log(`Found direct m3u8 URL: ${m3u8Match[1]}`);
+          return {
+            url: m3u8Match[1],
+            quality: 'Auto'
+          };
+        }
+        
+        // Method 3: Look for sources array
+        const sourcesMatch = scriptContent.match(/sources?\s*:\s*\[?\s*{\s*file\s*:\s*["']([^"']+)["']/);
+        if (sourcesMatch) {
+          console.log(`Found sources URL: ${sourcesMatch[1]}`);
+          return {
+            url: sourcesMatch[1],
+            quality: 'Auto'
+          };
+        }
+      }
+    }
+    
+    // Method 4: Look for video/source tags
+    const $ = cheerio.load(html);
+    const videoSrc = $('video source').attr('src') || $('video').attr('src');
+    if (videoSrc) {
+      const fullSrc = videoSrc.startsWith('http') ? videoSrc : `https://filemoon.sx${videoSrc}`;
+      console.log(`Found video source tag: ${fullSrc}`);
+      return {
+        url: fullSrc,
+        quality: 'Auto'
+      };
+    }
+    
+    // Method 5: Look for API calls in scripts
+    const apiMatch = html.match(/\$\.ajax\s*\(\s*{\s*url\s*:\s*["']([^"']+)["']/);
+    if (apiMatch) {
+      console.log(`Found AJAX API call: ${apiMatch[1]}`);
+      try {
+        const apiUrl = apiMatch[1].startsWith('http') ? apiMatch[1] : `https://filemoon.sx${apiMatch[1]}`;
+        const apiResponse = await axiosInstance.get(apiUrl, {
+          headers: {
+            'Referer': referer,
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+        
+        if (apiResponse.data && apiResponse.data.file) {
+          return {
+            url: apiResponse.data.file,
+            quality: 'Auto'
+          };
+        }
+      } catch (error) {
+        console.error('Error fetching API:', error.message);
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting from Filemoon page:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Generic video extractor for various player types
+ * @param {string} playerUrl - Player URL
+ * @returns {Promise<string|null>}
+ */
 async function extractVideoFromPlayer(playerUrl) {
   try {
     console.log(`Extracting video from player: ${playerUrl}`);
+    
+    // Check if it's a Filemoon player
+    if (playerUrl.includes('filemoon') || playerUrl.includes('moonplayer') || playerUrl.includes('fmoonembed')) {
+      const result = await extractFilemoonVideo(playerUrl);
+      return result ? result.url : null;
+    }
     
     // Fetch the player page
     const response = await axiosInstance.get(playerUrl, {
@@ -96,6 +302,7 @@ function extractDataId(element) {
 module.exports = {
   fetchPage,
   extractVideoFromPlayer,
+  extractFilemoonVideo,
   extractDataId,
   axiosInstance
 };
