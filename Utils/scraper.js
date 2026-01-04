@@ -25,6 +25,97 @@ async function fetchPage(url) {
 }
 
 /**
+ * Extract ICO3C file_code from animedisk watch page
+ * @param {string} html - Watch page HTML
+ * @returns {string|null} - file_code or null
+ */
+function extractIco3cFileCode(html) {
+  try {
+    // Look for ico3c.com embed with file_code parameter
+    const ico3cMatch = html.match(/ico3c\.com\/[^"']*file_code=([a-zA-Z0-9]+)/);
+    if (ico3cMatch) {
+      console.log(`Found ico3c file_code: ${ico3cMatch[1]}`);
+      return ico3cMatch[1];
+    }
+    
+    // Alternative: Look for iframe src
+    const $ = cheerio.load(html);
+    const iframeSrc = $('iframe[src*="ico3c"]').attr('src');
+    if (iframeSrc) {
+      const match = iframeSrc.match(/file_code=([a-zA-Z0-9]+)/);
+      if (match) {
+        console.log(`Found ico3c file_code in iframe: ${match[1]}`);
+        return match[1];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting ico3c file_code:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Extract m3u8 URL from ICO3C player
+ * @param {string} fileCode - ICO3C file code
+ * @param {string} referer - Referer URL
+ * @returns {Promise<string|null>}
+ */
+async function extractIco3cVideo(fileCode, referer) {
+  try {
+    console.log(`Extracting video from ICO3C: ${fileCode}`);
+    
+    // Build ICO3C API URL
+    const apiUrl = `https://ico3c.com/d/?b=view&file_code=${fileCode}&referer=${encodeURIComponent(referer)}`;
+    
+    console.log(`Fetching ICO3C API: ${apiUrl}`);
+    
+    const html = await cloudscraper.get({
+      uri: apiUrl,
+      headers: {
+        'Referer': referer,
+        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      }
+    });
+    
+    // Look for m3u8 URL in response
+    const m3u8Match = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+    if (m3u8Match) {
+      console.log(`Found m3u8 URL: ${m3u8Match[1]}`);
+      return m3u8Match[1];
+    }
+    
+    // Look for master.m3u8 specifically
+    const masterMatch = html.match(/(https?:\/\/[^"'\s]+\/master\.m3u8[^"'\s]*)/);
+    if (masterMatch) {
+      console.log(`Found master.m3u8 URL: ${masterMatch[1]}`);
+      return masterMatch[1];
+    }
+    
+    // Look in script tags
+    const $ = cheerio.load(html);
+    const scripts = $('script').map((i, el) => $(el).html()).get();
+    
+    for (const script of scripts) {
+      const scriptM3u8 = script.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+      if (scriptM3u8) {
+        console.log(`Found m3u8 in script: ${scriptM3u8[1]}`);
+        return scriptM3u8[1];
+      }
+    }
+    
+    console.log('No m3u8 URL found in ICO3C response');
+    return null;
+    
+  } catch (error) {
+    console.error('Error extracting ICO3C video:', error.message);
+    return null;
+  }
+}
+
+/**
  * JavaScript unpacker for packed/obfuscated code
  * Handles p,a,c,k,e,d format commonly used by video players
  */
@@ -190,33 +281,6 @@ async function extractFromFilemoonPage(html, referer) {
       };
     }
     
-    // Method 5: Look for API calls in scripts
-    const apiMatch = html.match(/\$\.ajax\s*\(\s*{\s*url\s*:\s*["']([^"']+)["']/);
-    if (apiMatch) {
-      console.log(`Found AJAX API call: ${apiMatch[1]}`);
-      try {
-        const apiUrl = apiMatch[1].startsWith('http') ? apiMatch[1] : `https://filemoon.sx${apiMatch[1]}`;
-        const apiResponse = await cloudscraper.get({
-          uri: apiUrl,
-          headers: {
-            'Referer': referer,
-            'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          },
-          json: true
-        });
-        
-        if (apiResponse && apiResponse.file) {
-          return {
-            url: apiResponse.file,
-            quality: 'Auto'
-          };
-        }
-      } catch (error) {
-        console.error('Error fetching API:', error.message);
-      }
-    }
-    
     return null;
   } catch (error) {
     console.error('Error extracting from Filemoon page:', error.message);
@@ -226,72 +290,54 @@ async function extractFromFilemoonPage(html, referer) {
 
 /**
  * Generic video extractor for various player types
- * @param {string} playerUrl - Player URL
+ * Now supports ICO3C as primary method
+ * @param {string} watchUrl - AnimeDisk watch page URL
  * @returns {Promise<string|null>}
  */
-async function extractVideoFromPlayer(playerUrl) {
+async function extractVideoFromPlayer(watchUrl) {
   try {
-    console.log(`Extracting video from player: ${playerUrl}`);
+    console.log(`Extracting video from watch page: ${watchUrl}`);
     
-    // Check if it's a Filemoon player
-    if (playerUrl.includes('filemoon') || playerUrl.includes('moonplayer') || playerUrl.includes('fmoonembed')) {
-      const result = await extractFilemoonVideo(playerUrl);
-      return result ? result.url : null;
-    }
-    
-    // Fetch the player page with Cloudflare bypass
+    // Fetch the watch page with Cloudflare bypass
     const html = await cloudscraper.get({
-      uri: playerUrl,
+      uri: watchUrl,
       headers: {
         'Referer': config.BASE_URL,
-        'X-Requested-With': 'XMLHttpRequest',
-        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     });
     
+    // Method 1: Try ICO3C extraction (primary method for animedisk)
+    const fileCode = extractIco3cFileCode(html);
+    if (fileCode) {
+      const m3u8Url = await extractIco3cVideo(fileCode, watchUrl);
+      if (m3u8Url) {
+        return m3u8Url;
+      }
+    }
+    
+    // Method 2: Try Filemoon extraction (fallback)
     const $ = cheerio.load(html);
-    
-    // Method 1: Check for API endpoints (common in anime sites)
-    const scriptTags = $('script').map((i, el) => $(el).html()).get();
-    
-    for (const script of scriptTags) {
-      // Look for video sources in JavaScript
-      const sourceMatch = script.match(/sources?\s*:\s*\[?\s*{[^}]*file\s*:\s*["']([^"']+)["']/i);
-      if (sourceMatch) {
-        return sourceMatch[1];
-      }
-      
-      // Look for direct m3u8 URLs
-      const m3u8Match = script.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
-      if (m3u8Match) {
-        return m3u8Match[1];
-      }
-      
-      // Look for mp4 URLs
-      const mp4Match = script.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/);
-      if (mp4Match) {
-        return mp4Match[1];
+    const filemoonIframe = $('iframe[src*="filemoon"]').attr('src');
+    if (filemoonIframe) {
+      const fullUrl = filemoonIframe.startsWith('http') ? filemoonIframe : `https:${filemoonIframe}`;
+      const result = await extractFilemoonVideo(fullUrl);
+      if (result) {
+        return result.url;
       }
     }
     
-    // Method 2: Look in HTML
-    const m3u8MatchHtml = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
-    if (m3u8MatchHtml) {
-      return m3u8MatchHtml[1];
+    // Method 3: Look for any m3u8 URLs in the page
+    const m3u8Match = html.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/);
+    if (m3u8Match) {
+      console.log(`Found direct m3u8 in watch page: ${m3u8Match[1]}`);
+      return m3u8Match[1];
     }
     
-    const mp4MatchHtml = html.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/);
-    if (mp4MatchHtml) {
-      return mp4MatchHtml[1];
-    }
-    
-    // Method 3: Check for video/source tags
-    const videoSrc = $('video source').attr('src') || $('video').attr('src');
-    if (videoSrc) {
-      return videoSrc.startsWith('http') ? videoSrc : `${config.BASE_URL}${videoSrc}`;
-    }
-    
+    console.log('No video URL found');
     return null;
+    
   } catch (error) {
     console.error('Error extracting video URL:', error.message);
     return null;
@@ -309,5 +355,7 @@ module.exports = {
   fetchPage,
   extractVideoFromPlayer,
   extractFilemoonVideo,
+  extractIco3cFileCode,
+  extractIco3cVideo,
   extractDataId
 };
