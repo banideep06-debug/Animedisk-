@@ -1,23 +1,23 @@
-const axios = require('axios');
+const cloudscraper = require('cloudscraper');
 const cheerio = require('cheerio');
 const config = require('../config');
 
-const axiosInstance = axios.create({
-  headers: {
-    'User-Agent': config.USER_AGENT,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': config.BASE_URL,
-    'Connection': 'keep-alive'
-  },
-  timeout: 15000
-});
-
+/**
+ * Fetch page with Cloudflare bypass
+ * Uses cloudscraper to handle Cloudflare protection
+ */
 async function fetchPage(url) {
   try {
-    console.log(`Fetching: ${url}`);
-    const response = await axiosInstance.get(url);
-    return cheerio.load(response.data);
+    console.log(`Fetching (with CF bypass): ${url}`);
+    const html = await cloudscraper.get({
+      uri: url,
+      headers: {
+        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      }
+    });
+    return cheerio.load(html);
   } catch (error) {
     console.error(`Error fetching ${url}:`, error.message);
     throw error;
@@ -73,16 +73,16 @@ async function extractFilemoonVideo(playerUrl) {
   try {
     console.log(`Extracting video from Filemoon: ${playerUrl}`);
     
-    // Fetch the player page
-    const response = await axiosInstance.get(playerUrl, {
+    // Fetch the player page with Cloudflare bypass
+    const html = await cloudscraper.get({
+      uri: playerUrl,
       headers: {
         'Referer': config.BASE_URL,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
+        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     });
     
-    const html = response.data;
     const $ = cheerio.load(html);
     
     // Method 1: Look for iframe redirect (Filemoon often uses nested iframes)
@@ -92,14 +92,16 @@ async function extractFilemoonVideo(playerUrl) {
       console.log(`Found nested Filemoon iframe: ${iframeSrc}`);
       
       // Fetch the nested iframe
-      const iframeResponse = await axiosInstance.get(iframeSrc, {
+      const iframeHtml = await cloudscraper.get({
+        uri: iframeSrc,
         headers: {
           'Referer': playerUrl,
+          'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
       });
       
-      return await extractFromFilemoonPage(iframeResponse.data, iframeSrc);
+      return await extractFromFilemoonPage(iframeHtml, iframeSrc);
     }
     
     // Method 2: Extract directly from current page
@@ -194,16 +196,19 @@ async function extractFromFilemoonPage(html, referer) {
       console.log(`Found AJAX API call: ${apiMatch[1]}`);
       try {
         const apiUrl = apiMatch[1].startsWith('http') ? apiMatch[1] : `https://filemoon.sx${apiMatch[1]}`;
-        const apiResponse = await axiosInstance.get(apiUrl, {
+        const apiResponse = await cloudscraper.get({
+          uri: apiUrl,
           headers: {
             'Referer': referer,
-            'X-Requested-With': 'XMLHttpRequest'
-          }
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          json: true
         });
         
-        if (apiResponse.data && apiResponse.data.file) {
+        if (apiResponse && apiResponse.file) {
           return {
-            url: apiResponse.data.file,
+            url: apiResponse.file,
             quality: 'Auto'
           };
         }
@@ -234,15 +239,16 @@ async function extractVideoFromPlayer(playerUrl) {
       return result ? result.url : null;
     }
     
-    // Fetch the player page
-    const response = await axiosInstance.get(playerUrl, {
+    // Fetch the player page with Cloudflare bypass
+    const html = await cloudscraper.get({
+      uri: playerUrl,
       headers: {
         'Referer': config.BASE_URL,
-        'X-Requested-With': 'XMLHttpRequest'
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': config.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
     
-    const html = response.data;
     const $ = cheerio.load(html);
     
     // Method 1: Check for API endpoints (common in anime sites)
@@ -303,6 +309,5 @@ module.exports = {
   fetchPage,
   extractVideoFromPlayer,
   extractFilemoonVideo,
-  extractDataId,
-  axiosInstance
+  extractDataId
 };
