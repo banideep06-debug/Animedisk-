@@ -19,7 +19,8 @@
     "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.6.2",
     "cheerio": "^1.0.0-rc.12",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "cloudscraper": "^4.6.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
