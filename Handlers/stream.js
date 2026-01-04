@@ -1,252 +1,147 @@
 const NodeCache = require('node-cache');
-const { fetchPage, extractFilemoonVideo } = require('../Utils/scraper');
+const { fetchPage, extractVideoFromPlayer } = require('../Utils/scraper');
 const config = require('../config');
 
 const cache = new NodeCache({ stdTTL: config.STREAM_CACHE_TTL });
 
 /**
  * Get stream URLs for movies and TV series from AnimeDisk
- * Supports Filemoon server extraction
+ * Supports ICO3C and Filemoon server extraction
  * 
- * @param {string} type - Content type ('movie' or 'series')
- * @param {string} id - Content ID in format 'animedisk:slug' or 'animedisk:slug:episodeNum'
- * @returns {Promise<{streams: Array}>} Stream objects for Stremio
+ * Watch URL format: https://animedisk.me/watch/{anime-id}?ep={episode-id}
+ * 
+ * @param {string} type - 'movie' or 'series'
+ * @param {string} id - Format: 'animedisk:slug:episodeNumber' or 'animedisk:slug'
+ * @returns {Promise<{streams: Array}>}
  */
 async function getStream(type, id) {
-  const cacheKey = `stream_${type}_${id}`;
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    console.log(`Stream cache hit: ${cacheKey}`);
-    return cached;
-  }
-
   try {
+    // Check cache first
+    const cacheKey = `stream_${type}_${id}`;
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      console.log(`Cache hit for ${cacheKey}`);
+      return cached;
+    }
+
+    console.log(`Getting stream for: type=${type}, id=${id}`);
+
+    // Parse the ID
+    // Format: animedisk:slug or animedisk:slug:episodeNumber
+    // But we need anime-id and episode-id from the actual watch URL
     const parts = id.split(':');
+    if (parts[0] !== 'animedisk') {
+      console.log('Invalid ID format');
+      return { streams: [] };
+    }
+
     const slug = parts[1];
     const episodeNum = parts[2] ? parseInt(parts[2]) : null;
 
-    console.log(`Getting stream for: type=${type}, slug=${slug}, episode=${episodeNum}`);
+    console.log(`Parsed: slug=${slug}, episodeNum=${episodeNum}`);
 
-    let watchUrl;
+    // For animedisk, we need to:
+    // 1. First get the anime page to find the anime-id
+    // 2. Then construct the watch URL with anime-id and episode-id
+    
+    // Fetch the anime page
+    const animePageUrl = `${config.BASE_URL}/${slug}`;
+    console.log(`Fetching anime page: ${animePageUrl}`);
+    
+    const $ = await fetchPage(animePageUrl);
+    
+    // Find the watch URL
+    // AnimeDisk uses format: /watch/{anime-id}?ep={episode-id}
+    let watchUrl = null;
     
     if (type === 'series' && episodeNum) {
-      // For TV series episodes, we need to find the specific episode watch URL
-      const animeUrl = `${config.BASE_URL}/${slug}`;
-      console.log(`Fetching anime page: ${animeUrl}`);
-      
-      const $ = await fetchPage(animeUrl);
-      
-      // Extract episode links from the page
-      let foundEpisode = null;
-      
-      // Method 1: Look for episode links in various containers
+      // Find the specific episode
+      // Look for episode links with data-number or episode number in text
       const episodeSelectors = [
-        '#seasons-block .ss-list a',
-        '.detail-infor-content .ss-list a',
-        '.ss-list a',
-        '.ep-item a',
-        '.ss-choice a',
-        '.list-ep a',
-        '.eps-list a',
-        '.episode-list a'
+        `.ss-list a[data-number="${episodeNum}"]`,
+        `.ss-list a:contains("Episode ${episodeNum}")`,
+        `.ss-list a:contains("Ep ${episodeNum}")`,
+        `.ss-list a:contains("${episodeNum}")`,
+        `.episode-list a[data-number="${episodeNum}"]`,
+        `.ep-item a[data-number="${episodeNum}"]`
       ];
       
       for (const selector of episodeSelectors) {
-        if (foundEpisode) break;
-        
-        $(selector).each((i, element) => {
-          const $ep = $(element);
-          const epTitle = $ep.attr('title') || $ep.text().trim();
-          const epHref = $ep.attr('href');
-          const dataNumber = $ep.attr('data-number');
-          const dataId = $ep.attr('data-id');
-          
-          // Try to match episode number
-          let epNum = null;
-          
-          // From data-number attribute
-          if (dataNumber) {
-            epNum = parseInt(dataNumber);
+        const episodeLink = $(selector).first();
+        if (episodeLink.length > 0) {
+          const href = episodeLink.attr('href');
+          if (href) {
+            watchUrl = href.startsWith('http') ? href : `${config.BASE_URL}${href}`;
+            console.log(`Found episode ${episodeNum} watch URL: ${watchUrl}`);
+            break;
           }
-          // From data-id attribute
-          else if (dataId) {
-            const match = dataId.match(/\d+/);
-            if (match) epNum = parseInt(match[0]);
-          }
-          // From title/text
-          else {
-            const match = epTitle.match(/(?:episode|ep|e)\s*(\d+)/i);
-            if (match) epNum = parseInt(match[1]);
-          }
-          // From href URL
-          else if (epHref) {
-            const urlMatch = epHref.match(/(\d+)$/);
-            if (urlMatch) epNum = parseInt(urlMatch[1]);
-          }
-          
-          if (epNum === episodeNum && epHref) {
-            foundEpisode = epHref;
-            console.log(`Found episode ${episodeNum}: ${epHref}`);
-            return false; // break
-          }
-        });
+        }
       }
       
-      if (!foundEpisode) {
+      // If not found by selector, try finding by index
+      if (!watchUrl) {
+        const allEpisodes = $('.ss-list a, .episode-list a, .ep-item a');
+        if (allEpisodes.length >= episodeNum) {
+          const episodeLink = allEpisodes.eq(episodeNum - 1);
+          const href = episodeLink.attr('href');
+          if (href) {
+            watchUrl = href.startsWith('http') ? href : `${config.BASE_URL}${href}`;
+            console.log(`Found episode ${episodeNum} by index: ${watchUrl}`);
+          }
+        }
+      }
+      
+      if (!watchUrl) {
         console.log(`Episode ${episodeNum} not found for ${slug}`);
         return { streams: [] };
       }
-      
-      watchUrl = foundEpisode.startsWith('http') ? foundEpisode : `${config.BASE_URL}${foundEpisode}`;
     } else {
-      // For movies, the anime page is typically the watch page
-      watchUrl = `${config.BASE_URL}/${slug}`;
+      // For movies or first episode, get the first watch link
+      const firstWatchLink = $('a[href*="/watch/"]').first();
+      if (firstWatchLink.length > 0) {
+        const href = firstWatchLink.attr('href');
+        watchUrl = href.startsWith('http') ? href : `${config.BASE_URL}${href}`;
+        console.log(`Found watch URL: ${watchUrl}`);
+      } else {
+        console.log('No watch URL found');
+        return { streams: [] };
+      }
     }
 
-    console.log(`Watch URL: ${watchUrl}`);
-    
-    // Fetch the watch/episode page
-    const $ = await fetchPage(watchUrl);
-    const streams = [];
-    
-    // Extract server links and iframes
-    const serverData = [];
-    
-    // Method 1: Find server selection buttons/links
-    $('.server-item, .link-item, .anime_muti_link li, .ps_-block .ps__-list .item').each((i, element) => {
-      const $server = $(element);
-      const serverId = $server.attr('data-id') || $server.attr('data-video') || $server.attr('data-linkid');
-      const serverName = $server.text().trim() || $server.attr('title') || `Server ${i + 1}`;
-      const dataLink = $server.attr('data-link');
-      
-      if (serverId || dataLink) {
-        serverData.push({
-          id: serverId,
-          name: serverName,
-          link: dataLink
-        });
-        console.log(`Found server: ${serverName} (ID: ${serverId || dataLink})`);
-      }
-    });
-    
-    // Method 2: Find iframes directly embedded
-    const iframes = [];
-    $('iframe').each((i, element) => {
-      const src = $(element).attr('src') || $(element).attr('data-src');
-      if (src && !src.includes('google') && !src.includes('facebook') && !src.includes('disqus')) {
-        const fullSrc = src.startsWith('http') ? src : (src.startsWith('//') ? `https:${src}` : `${config.BASE_URL}${src}`);
-        iframes.push({
-          url: fullSrc,
-          name: `Embedded ${i + 1}`
-        });
-        console.log(`Found iframe: ${fullSrc}`);
-      }
-    });
-    
-    // Method 3: Look for Filemoon links in scripts
-    $('script').each((i, element) => {
-      const scriptContent = $(element).html();
-      if (scriptContent) {
-        // Look for Filemoon URLs
-        const filemoonMatch = scriptContent.match(/(https?:\/\/[^"'\s]*filemoon[^"'\s]*)/gi);
-        if (filemoonMatch) {
-          filemoonMatch.forEach(url => {
-            if (!iframes.find(f => f.url === url)) {
-              iframes.push({
-                url: url,
-                name: 'Filemoon'
-              });
-              console.log(`Found Filemoon URL in script: ${url}`);
-            }
-          });
-        }
-      }
-    });
-    
-    // Process Filemoon servers
-    const filemoonServers = iframes.filter(iframe => 
-      iframe.url.includes('filemoon') || 
-      iframe.url.includes('moonplayer') ||
-      iframe.url.includes('fmoonembed')
-    );
-    
-    console.log(`Found ${filemoonServers.length} Filemoon servers`);
-    
-    // Extract video from Filemoon servers (prioritize Filemoon)
-    for (let i = 0; i < filemoonServers.length; i++) {
-      try {
-        const server = filemoonServers[i];
-        console.log(`Extracting from Filemoon server: ${server.url}`);
-        
-        const videoData = await extractFilemoonVideo(server.url);
-        
-        if (videoData && videoData.url) {
-          streams.push({
-            title: `Filemoon | ${videoData.quality || 'HD'}`,
-            url: videoData.url,
-            behaviorHints: {
-              notWebReady: videoData.url.includes('.m3u8')
-            }
-          });
-          
-          console.log(`Successfully extracted Filemoon stream: ${videoData.quality || 'HD'}`);
-        }
-      } catch (error) {
-        console.error(`Error extracting from Filemoon server ${i}:`, error.message);
-      }
+    if (!watchUrl) {
+      console.log('Could not determine watch URL');
+      return { streams: [] };
     }
-    
-    // If no Filemoon streams found, try other iframes
-    if (streams.length === 0) {
-      console.log('No Filemoon streams found, trying other servers...');
-      
-      const otherServers = iframes.filter(iframe => 
-        !iframe.url.includes('filemoon') && 
-        !iframe.url.includes('moonplayer') &&
-        !iframe.url.includes('fmoonembed')
-      );
-      
-      for (let i = 0; i < Math.min(otherServers.length, 2); i++) {
-        try {
-          const server = otherServers[i];
-          console.log(`Trying alternative server: ${server.url}`);
-          
-          const videoData = await extractFilemoonVideo(server.url);
-          
-          if (videoData && videoData.url) {
-            streams.push({
-              title: `${server.name} | ${videoData.quality || 'HD'}`,
-              url: videoData.url,
-              behaviorHints: {
-                notWebReady: videoData.url.includes('.m3u8')
-              }
-            });
-            
-            console.log(`Successfully extracted stream from ${server.name}`);
-          }
-        } catch (error) {
-          console.error(`Error extracting from server ${i}:`, error.message);
-        }
-      }
-    }
-    
-    // Remove duplicates
-    const uniqueStreams = streams.filter((stream, index, self) =>
-      index === self.findIndex((s) => s.url === stream.url)
-    );
 
-    const result = { streams: uniqueStreams };
-    
-    if (result.streams.length > 0) {
-      cache.set(cacheKey, result);
-      console.log(`Found ${result.streams.length} unique streams`);
-    } else {
-      console.log('No streams found');
+    // Extract video URL from the watch page
+    console.log(`Extracting video from: ${watchUrl}`);
+    const videoUrl = await extractVideoFromPlayer(watchUrl);
+
+    if (!videoUrl) {
+      console.log('No video URL extracted');
+      return { streams: [] };
     }
+
+    // Build stream response
+    const streams = [{
+      title: 'AnimeDisk | Auto',
+      url: videoUrl,
+      behaviorHints: {
+        notWebReady: true,
+        bingeGroup: `animedisk-${slug}`
+      }
+    }];
+
+    const result = { streams };
     
+    // Cache the result
+    cache.set(cacheKey, result);
+    
+    console.log(`Successfully extracted stream for ${id}`);
     return result;
+
   } catch (error) {
-    console.error('Stream error:', error);
+    console.error('Error in getStream:', error);
     return { streams: [] };
   }
 }
