@@ -1,0 +1,30 @@
+{
+  "name": "animedisk-stremio-addon",
+  "version": "1.0.0",
+  "description": "Stremio addon for streaming anime from animedisk.me with TMDB metadata",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": ["stremio", "addon", "anime", "animedisk", "hindi", "dubbed"],
+  "author": "veera590",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veera590/anime-streaming-addon.git"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "axios": "^1.6.2",
+    "cheerio": "^1.0.0-rc.12",
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
