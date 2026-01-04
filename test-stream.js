@@ -3,7 +3,7 @@
  * Run with: node test-stream.js
  */
 
-const { getStream } = require('./handlers/stream');
+const { getStream } = require('./Handlers/stream');
 
 // Test cases
 const testCases = [
